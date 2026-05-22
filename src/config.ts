@@ -5,14 +5,23 @@ import { readEnvFile } from './env.js';
 import { isValidTimezone } from './timezone.js';
 
 // Read config values from .env (falls back to process.env).
-// Secrets (API keys, tokens) are NOT read here — they are loaded only
-// by the credential proxy (credential-proxy.ts), never exposed to containers.
+// Anthropic secrets (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN) are NOT read
+// here — they are loaded only by the credential proxy (credential-proxy.ts)
+// and never exposed to containers. LOCAL_LLM_API_KEY is an exception: when
+// NANOCLAW_BACKEND=local the container talks directly to a local/operator-run
+// OpenAI-compatible endpoint, so the key must be readable here. It is injected
+// into the container via the runtime env (never argv) — see buildContainerArgs
+// and the spawn() call in runContainerAgent.
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
   'TZ',
   'NANOCLAW_MODEL',
   'NANOCLAW_SUBAGENT_MODEL',
+  'NANOCLAW_BACKEND',
+  'LOCAL_LLM_BASE_URL',
+  'LOCAL_LLM_MODEL',
+  'LOCAL_LLM_API_KEY',
   // Feature-flag / integration env vars defined further down in this file.
   // systemd doesn't load /opt/breadbrich/.env globally, so anything that
   // should be operator-configurable must be listed here for readEnvFile to
@@ -229,3 +238,23 @@ export const NANOCLAW_SUBAGENT_MODEL =
   process.env.NANOCLAW_SUBAGENT_MODEL ||
   envConfig.NANOCLAW_SUBAGENT_MODEL ||
   undefined;
+
+// Backend selection: 'claude' (default) routes through the Claude Agent SDK;
+// 'local' routes through an OpenAI-compatible chat-completions endpoint
+// (LM Studio, llama.cpp server, vLLM, Ollama in OpenAI mode, etc.).
+// One backend per process — switch by restarting with NANOCLAW_BACKEND set.
+const rawBackend = (
+  process.env.NANOCLAW_BACKEND ||
+  envConfig.NANOCLAW_BACKEND ||
+  'claude'
+).toLowerCase();
+export const NANOCLAW_BACKEND: 'claude' | 'local' =
+  rawBackend === 'local' ? 'local' : 'claude';
+export const LOCAL_LLM_BASE_URL =
+  process.env.LOCAL_LLM_BASE_URL ||
+  envConfig.LOCAL_LLM_BASE_URL ||
+  'http://host.docker.internal:1234/v1';
+export const LOCAL_LLM_MODEL =
+  process.env.LOCAL_LLM_MODEL || envConfig.LOCAL_LLM_MODEL || undefined;
+export const LOCAL_LLM_API_KEY =
+  process.env.LOCAL_LLM_API_KEY || envConfig.LOCAL_LLM_API_KEY || undefined;

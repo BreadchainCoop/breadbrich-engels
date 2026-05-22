@@ -14,6 +14,10 @@ import {
   DATA_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
+  LOCAL_LLM_API_KEY,
+  LOCAL_LLM_BASE_URL,
+  LOCAL_LLM_MODEL,
+  NANOCLAW_BACKEND,
   NANOCLAW_MODEL,
   NANOCLAW_SUBAGENT_MODEL,
   SHARED_KB_GROUP,
@@ -280,21 +284,39 @@ function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // Route API traffic through the credential proxy (containers never see real secrets)
-  args.push(
-    '-e',
-    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
-  );
+  // Route API traffic through the credential proxy (containers never see real secrets).
+  // Skipped in local-LLM mode — no Anthropic traffic, no proxy required.
+  if (NANOCLAW_BACKEND !== 'local') {
+    args.push(
+      '-e',
+      `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
+    );
 
-  // Mirror the host's auth method with a placeholder value.
-  // API key mode: SDK sends x-api-key, proxy replaces with real key.
-  // OAuth mode:   SDK exchanges placeholder token for temp API key,
-  //               proxy injects real OAuth token on that exchange request.
-  const authMode = detectAuthMode();
-  if (authMode === 'api-key') {
-    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
-  } else {
-    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    // Mirror the host's auth method with a placeholder value.
+    // API key mode: SDK sends x-api-key, proxy replaces with real key.
+    // OAuth mode:   SDK exchanges placeholder token for temp API key,
+    //               proxy injects real OAuth token on that exchange request.
+    const authMode = detectAuthMode();
+    if (authMode === 'api-key') {
+      args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+    } else {
+      args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    }
+  }
+
+  // Backend selection (consumed by container/agent-runner)
+  args.push('-e', `NANOCLAW_BACKEND=${NANOCLAW_BACKEND}`);
+  if (NANOCLAW_BACKEND === 'local') {
+    args.push('-e', `LOCAL_LLM_BASE_URL=${LOCAL_LLM_BASE_URL}`);
+    if (LOCAL_LLM_MODEL) {
+      args.push('-e', `LOCAL_LLM_MODEL=${LOCAL_LLM_MODEL}`);
+    }
+    // API key: passthrough flag only (no value) so the secret is never in
+    // argv or the containerArgs debug log. The actual value is injected
+    // through the runtime's process env in runContainerAgent.spawn().
+    if (LOCAL_LLM_API_KEY) {
+      args.push('-e', 'LOCAL_LLM_API_KEY');
+    }
   }
 
   // Model routing: pass orchestrator and subagent models to container
@@ -384,17 +406,24 @@ export async function runContainerAgent(
   fs.mkdirSync(logsDir, { recursive: true });
 
   return new Promise((resolve) => {
-    // Inject the GitHub PAT only into the runtime's process environment
-    // (never argv), matching the `-e GITHUB_PERSONAL_ACCESS_TOKEN`
-    // passthrough flag added in buildContainerArgs.
+    // Inject sensitive env values only into the runtime's process
+    // environment (never argv), matching the `-e NAME` passthrough flags
+    // added in buildContainerArgs. Keeps secrets out of the containerArgs
+    // debug log and host `ps` output.
     const githubToken = getGithubToken();
+    const llmApiKey =
+      NANOCLAW_BACKEND === 'local' ? LOCAL_LLM_API_KEY : undefined;
+    const envOverrides: NodeJS.ProcessEnv = {};
+    if (githubToken) envOverrides.GITHUB_PERSONAL_ACCESS_TOKEN = githubToken;
+    if (llmApiKey) envOverrides.LOCAL_LLM_API_KEY = llmApiKey;
+    const hasEnvOverrides = Object.keys(envOverrides).length > 0;
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      ...(githubToken
+      ...(hasEnvOverrides
         ? {
             env: {
               ...process.env,
-              GITHUB_PERSONAL_ACCESS_TOKEN: githubToken,
+              ...envOverrides,
             },
           }
         : {}),
