@@ -31,7 +31,7 @@ DEPLOY_SH=/opt/breadbrich-backups/safe-deploy.sh
 APP_USER=breadbrich
 FORCE_FILE=/opt/breadbrich-backups/.deploy-force
 DEFER_STATE=/run/breadbrich-deploy-deferred-since
-MAX_DEFER_SECONDS=900   # 15 min — override via env if needed
+MAX_DEFER_SECONDS="${MAX_DEFER_SECONDS:-900}"   # 15 min — override via env
 
 log() { echo "[auto-deploy $(date -u +%H:%M:%S)] $*"; }
 
@@ -52,8 +52,9 @@ if [ "$LOCAL" = "$REMOTE" ]; then
 fi
 
 # Mirror is behind. Drain-check before triggering safe-deploy.
-ACTIVE=$(docker ps --filter "name=^nanoclaw-" -q 2>/dev/null || true)
-ACTIVE_COUNT=$(printf '%s\n' "$ACTIVE" | grep -c . || true)
+# `--filter name=` is substring match (not regex) — matches the convention
+# in src/container-runtime.ts and scripts/hourly-ops.sh.
+ACTIVE_COUNT=$(docker ps --filter name=nanoclaw- -q 2>/dev/null | grep -c . || true)
 
 if [ -f "$FORCE_FILE" ]; then
   log "force-file present at $FORCE_FILE — bypassing drain check"
@@ -61,7 +62,12 @@ if [ -f "$FORCE_FILE" ]; then
 elif [ "$ACTIVE_COUNT" -gt 0 ]; then
   NOW=$(date +%s)
   if [ -f "$DEFER_STATE" ]; then
-    SINCE=$(cat "$DEFER_STATE")
+    SINCE=$(cat "$DEFER_STATE" 2>/dev/null || echo "")
+    if ! [[ "$SINCE" =~ ^[0-9]+$ ]]; then
+      log "defer state file corrupt ('$SINCE') — resetting"
+      echo "$NOW" > "$DEFER_STATE"
+      SINCE=$NOW
+    fi
     WAITED=$((NOW - SINCE))
     if [ "$WAITED" -ge "$MAX_DEFER_SECONDS" ]; then
       log "deferred ${WAITED}s exceeds cap ${MAX_DEFER_SECONDS}s — proceeding anyway ($ACTIVE_COUNT container(s) still running)"
